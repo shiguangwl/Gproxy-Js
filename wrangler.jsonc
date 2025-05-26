@@ -1,0 +1,48 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gproxy-js",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-05-26",
+  "account_id": "<请填写您的 Account ID>",
+  "vars": {
+    "APP_ENV": "production"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "CACHE_STORE",
+      "id": "<请填写您的 KV Namespace ID>"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "CACHE_STORE_R2",
+      "bucket_name": "gproxy-cache-store"
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "gproxy-db",
+      "database_id": "<请填写您的 D1 Database ID>"
+    }
+  ],
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_classes": ["Migrations"]
+    }
+  ],
+  "placement": {
+    "mode": "smart"
+  }
+  // "compatibility_flags": [
+  //   "nodejs_compat"
+  // ],
+  // "ai": {
+  //   "binding": "AI"
+  // },
+  // "observability": {
+  //   "enabled": true,
+  //   "head_sampling_rate": 1
+  // }
+}

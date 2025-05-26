@@ -1,0 +1,491 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+
+**项目名称：HonoProxy - 动态配置型边缘 Web 代理**
+
+**项目概述：**
+
+HonoProxy可动态配置的边缘 Web 代理解决方案。它完全基于轻量级、高性能的 @HonoJS 框架构建，将后端代理逻辑与服务端渲染的前端管理界面统一在同一个项目中。用户首次访问管理后台时设置唯一管理员密码，之后所有代理行为，包括哪些目标 URL 被代理、如何修改响应内容（通过强大的动态匹配与替换规则），以及客户端异步请求的代理策略，均可在管理后台实时配置。HonoProxy 旨在提供一个灵活、强大且易于管理的个人或小团队代理工具，并特别优化以适应 Serverless 环境。
+
+**核心价值：**
+
+*   **单用户便捷管理：** 简化认证，首次设置密码，后续凭密登录。
+*   **极致动态配置：** 代理目标、内容替换规则、异步请求策略等核心行为均可在后台实时配置，无需重新部署。
+*   **强大内容修改：** 支持基于字符串或正则表达式的动态内容搜索与替换，可根据 URL 和 Content-Type 精细控制。
+*   **精细异步控制：** 可动态配置客户端 AJAX/Fetch 请求是走代理还是直接访问。
+*   **统一技术栈：** HonoJS 前后端统一，简化开发维护。
+*   **边缘高性能：** 适配 Serverless 环境，实现低延迟。
+
+---
+
+**项目架构与核心技术栈 (修订版)：**
+
+**核心原则：**
+
+1.  运行时无关性 (Web Standard APIs)。
+2.  边缘数据策略 (存储密码哈希、所有动态配置于边缘数据库)。
+3.  无状态 JWT 认证 (管理员登录)。
+4.  **静态资源分离与 CDN 优化 (Cloudflare Pages/CDN 托管静态文件)。**
+5.  **流式处理优先 (利用 `HTMLRewriter` 等流式 API)。**
+6.  安全性与性能考量 (ReDoS 防范, 输入校验, 资源限制意识)。
+
+**技术栈概览 (修订版)：**
+
+*   **Web 框架 (前后端统一):** HonoJS
+*   **前端 UI (Admin):** HonoJS JSX
+*   **数据库 (存储密码哈希、代理目标、替换规则、异步请求策略):**
+    *   **Cloudflare Workers (首选):** Cloudflare D1 (推荐，用于结构化配置数据)。
+    *   **Deno Deploy/Vercel:** Turso, PlanetScale, Neon.tech (通过 HTTP API)。
+*   **HTTP/HTTPS 请求 (代理核心):** Web Standard `fetch` API
+*   **WebSocket 代理:** `hono/websocket`, 平台原生 WebSocket API
+*   **HTML 解析/重写 (URL 转换、JS 注入、内容修改):** **Cloudflare `HTMLRewriter` (首选)**, `cheerio` (备选，非流式，谨慎使用)。
+*   **CSS 解析/重写 (URL 转换):** 正则表达式 (简单 URL 替换), `css-tree` (复杂场景，非流式，谨慎使用)。
+*   **认证:** JWT (管理员密码登录)
+*   **内容替换引擎:** 自定义逻辑，结合字符串操作和 RegExp，在 `HTMLRewriter` 上下文中操作。
+*   **客户端脚本 (`proxy_client.js`):** 用于拦截 AJAX/Fetch/WebSocket，并根据策略决策。
+*   **静态资源托管:** Cloudflare Pages (首选，用于托管 `proxy_client.js` 等静态文件)。
+
+**数据库 Schema (以 D1 为例):**
+
+1.  **`settings` 表:**
+    *   `key` (TEXT, PRIMARY KEY, e.g., 'admin_password_hash')
+    *   `value` (TEXT)
+2.  **`proxied_targets` 表:**
+    *   `id` (TEXT, PRIMARY KEY)
+    *   `target_url_prefix` (TEXT, UNIQUE, NOT NULL)
+    *   `is_active` (INTEGER, BOOLEAN, DEFAULT 1)
+    *   `enable_js_injection` (INTEGER, BOOLEAN, DEFAULT 0)
+    *   `notes` (TEXT, NULLABLE)
+    *   `created_at` (TEXT, DATETIME DEFAULT CURRENT_TIMESTAMP)
+    *   `updated_at` (TEXT, DATETIME DEFAULT CURRENT_TIMESTAMP)
+3.  **`replace_rules` 表:**
+    *   `id` (TEXT, PRIMARY KEY)
+    *   `name` (TEXT, NOT NULL)
+    *   `is_active` (INTEGER, BOOLEAN, DEFAULT 1)
+    *   `search_pattern` (TEXT, NOT NULL)
+    *   `replace_with` (TEXT, NOT NULL)
+    *   `match_type` (TEXT, CHECK(match_type IN ('string', 'regex')), NOT NULL)
+    *   `url_match_regex` (TEXT, NULLABLE)
+    *   `url_exclude_regex` (TEXT, NULLABLE)
+    *   `content_type_match` (TEXT, NULLABLE)
+    *   `order_priority` (INTEGER, DEFAULT 0)
+    *   `created_at` (TEXT, DATETIME DEFAULT CURRENT_TIMESTAMP)
+    *   `updated_at` (TEXT, DATETIME DEFAULT CURRENT_TIMESTAMP)
+4.  **`async_request_policies` 表:**
+    *   `id` (TEXT, PRIMARY KEY)
+    *   `name` (TEXT, NOT NULL, UNIQUE)
+    *   `is_active` (INTEGER, BOOLEAN, DEFAULT 1)
+    *   `target_url_pattern` (TEXT, NOT NULL) - 正则表达式字符串
+    *   `action` (TEXT, CHECK(action IN ('proxy', 'direct')), NOT NULL)
+    *   `apply_to_target_prefix` (TEXT, NULLABLE) - 关联 `proxied_targets.target_url_prefix`
+    *   `order_priority` (INTEGER, DEFAULT 0)
+    *   `notes` (TEXT, NULLABLE)
+    *   `created_at` (TEXT, DATETIME DEFAULT CURRENT_TIMESTAMP)
+    *   `updated_at` (TEXT, DATETIME DEFAULT CURRENT_TIMESTAMP)
+
+---
+
+**后台管理界面 (Admin UI) 功能模块详解：**
+
+1.  **首次密码设置 (Setup - `/admin/setup`)**
+2.  **登录 (Login - `/admin/login`)**
+3.  **仪表盘 (Dashboard - `/admin/dashboard`)**
+4.  **代理目标管理 (Proxied Targets - `/admin/targets`)**
+    *   列表视图、添加、编辑功能。
+5.  **内容替换规则管理 (Replacement Rules - `/admin/rules`)**
+    *   列表视图、添加、编辑功能。
+6.  **异步请求策略管理 (Async Request Policies - `/admin/async-policies`)**
+    *   **列表视图：** 展示所有策略。
+    *   **添加/编辑表单：** 包含名称, 激活状态, 目标 URL 模式 (正则), 执行动作 (代理/直连), 应用于 (可选的代理目标前缀), 优先级, 备注。
+7.  **全局设置 (Settings - `/admin/settings`)**
+    *   修改管理员密码。
+
+---
+
+**详细开发计划 (修订版 - 从零开始，整合所有需求与改进)：**
+
+**默认开发环境和数据库选择优先考虑 Cloudflare Workers 与 Cloudflare D1。静态资源优先考虑 Cloudflare Pages 托管。**
+
+#### 阶段 0: 项目初始化、认证与基础环境
+
+*   **0.1 HonoJS 项目初始化与目录结构()**
+    *   创建规划的目录结构:
+        ```
+        /
+        ├── public/             # (用于 Cloudflare Pages 静态资源)
+        │   └── js/
+        │       └── proxy_client.js
+        │   └── css/
+        │       └── admin_styles.css
+        ├── src/
+        │   ├── db/             # 数据库交互 (D1 schema, queries)
+        │   │   ├── schema.sql
+        │   │   └── index.ts
+        │   ├── lib/            # 核心库 (url-rewriter, content-modifier)
+        │   │   ├── url-rewriter.ts
+        │   │   └── content-modifier.ts
+        │   ├── middleware/     # Hono 中间件 (auth, config-check)
+        │   │   ├── auth.ts
+        │   │   ├── setup-check.ts
+        │   │   └── config-check.ts
+        │   ├── routes/         # Hono 路由
+        │   │   ├── admin.ts
+        │   │   └── proxy.ts
+        │   ├── services/       # 业务逻辑服务
+        │   │   ├── adminService.ts
+        │   │   └── proxyService.ts
+        │   ├── views/          # Hono JSX 视图组件
+        │   │   ├── layouts/
+        │   │   │   └── default.tsx
+        │   │   ├── admin/
+        │   │   │   ├── setup.tsx
+        │   │   │   ├── login.tsx
+        │   │   │   ├── dashboard.tsx
+        │   │   │   ├── targets.tsx
+        │   │   │   ├── rules.tsx
+        │   │   │   ├── async-policies.tsx
+        │   │   │   └── settings.tsx
+        │   │   └── components/ # 可复用 UI 组件
+        │   └── index.ts        # Hono 应用入口
+        ├── test/               # 测试目录
+        ├── .env.example
+        ├── .gitignore
+        ├── package.json
+        ├── tsconfig.json
+        └── wrangler.toml
+        ```
+*   **0.2 数据库抽象层与 Schema 定义 (Cloudflare D1)**
+    *   在 `wrangler.toml` 中配置 D1 数据库绑定
+    *   `src/db/schema.sql`: 编写所有表的 `CREATE TABLE` 语句，根据上述 Schema 定义。
+    *   使用 `wrangler d1 execute <YOUR_D1_DATABASE_NAME_FROM_WRANGLER> --file=./src/db/schema.sql` 命令创建表结构。
+    *   `src/db/index.ts`: 实现 D1 客户端的封装，通过 `c.env.DB` 访问 D1，提供与 `settings`, `proxied_targets`, `replace_rules`, `async_request_policies` 表交互的类型安全函数 (CRUD 操作)。
+        *   例如: `getSetting(key): Promise<string | null>`, `setSetting(key, value): Promise<void>`, `createProxiedTarget(data): Promise<ProxiedTarget>`, `getProxiedTargetByPrefix(prefix): Promise<ProxiedTarget | null>`, `listActiveReplaceRules(): Promise<ReplaceRule[]>`, 等。
+*   **0.3 核心依赖安装与配置**
+    *   安装以下 npm 包：`hono`, `dotenv`, `jsonwebtoken`, `bcryptjs`, `@cloudflare/workers-types`, `hono/jsx`, `hono/websocket`.
+    *   配置 `tsconfig.json`：确保 `compilerOptions.jsx` 和 `compilerOptions.jsxImportSource` 正确设置为 `"react-jsx"` 和 `"hono/jsx"`。
+*   **0.4 首次密码设置流程 (`/admin/setup`)**
+    *   `src/middleware/setup-check.ts`: 创建 Hono 中间件。
+        *   在此中间件中查询 `settings` 表中 `admin_password_hash` 是否存在。
+        *   如果 `admin_password_hash` 不存在且当前请求路径不是 `/admin/setup`，则重定向到 `/admin/setup`。
+        *   如果 `admin_password_hash` 已经存在且当前请求路径是 `/admin/setup`，则重定向到 `/admin/login` 或 `/admin/dashboard`。
+    *   `src/routes/admin.ts`: 添加 `/admin/setup` GET 和 POST 路由。GET 请求渲染设置页面，POST 请求处理表单提交。
+    *   `src/views/admin/setup.tsx`: 创建一个 Hono JSX 组件，用于渲染设置管理员密码的表单。包含密码和确认密码字段。
+    *   `src/services/adminService.ts`: 实现 `setupAdminPassword(password: string): Promise<void>` 函数，该函数负责使用 `bcryptjs` 对密码进行哈希处理，并将哈希值存储到 D1 的 `settings` 表中，键为 `'admin_password_hash'`。
+*   **0.5 管理员登录流程 (`/admin/login`)**
+    *   `src/middleware/auth.ts`: 创建 JWT 认证中间件。
+        *   该中间件检查传入请求的 `Authorization` 头（`Bearer <token>` 格式）或 Cookie 中的 JWT。
+        *   使用 `jsonwebtoken.verify` 方法验证 JWT 的有效性（包括签名、过期时间等）。如果验证通过，将解码后的 JWT Payload（包含用户ID或其他必要信息）通过 `c.set('user', payload)` 附加到 Hono context。
+        *   如果 JWT 无效或缺失，对于受保护的路由，返回 401 Unauthorized 状态码或重定向到 `/admin/login` 页面。
+    *   `src/routes/admin.ts`: 添加 `/admin/login` GET 和 POST 路由。GET 请求渲染登录页面，POST 请求处理登录表单提交。
+    *   `src/views/admin/login.tsx`: 创建 Hono JSX 组件，用于渲染包含用户名（或固定为“admin”）和密码字段的登录表单。
+    *   `src/services/adminService.ts`: 实现 `loginAdmin(password: string): Promise<string | null>` 函数，该函数从 D1 获取存储的 `admin_password_hash`，使用 `bcryptjs.compare` 方法比对输入密码。如果比对成功，使用 `jsonwebtoken.sign` 生成并返回一个 JWT。
+*   **0.6 基础 Admin UI 布局与仪表盘 (`/admin/dashboard`)**
+    *   `src/views/layouts/default.tsx`: 创建一个基础的 Hono JSX 布局组件，包含共享的头部（导航栏）、页脚以及 CSS 引用。所有管理员页面将使用此布局。
+    *   `src/views/admin/dashboard.tsx`: 创建一个简单的 Hono JSX 仪表盘页面组件，作为管理员登录后的主页面。
+    *   在 `src/routes/admin.ts` 中，将 `auth` 中间件和 `setup-check` 中间件应用于所有 `/admin/*` (除了 `/admin/setup`, `/admin/login` 路由) 路由，以确保只有已设置密码并登录的管理员才能访问。
+
+#### 阶段 1: 代理目标管理
+
+*   **1.1 数据库交互 (`proxied_targets`)**
+    *   `src/db/index.ts`: 实现 `proxied_targets` 表的 CRUD (创建、读取、更新、删除) 函数，以及一个用于查找匹配代理目标的函数：
+        *   `createProxiedTarget(data: ProxiedTargetInput): Promise<ProxiedTarget>`
+        *   `getProxiedTargetById(id: string): Promise<ProxiedTarget | null>`
+        *   `updateProxiedTarget(id: string, data: Partial<ProxiedTargetInput>): Promise<ProxiedTarget>`
+        *   `deleteProxiedTarget(id: string): Promise<void>`
+        *   `listProxiedTargets(): Promise<ProxiedTarget[]>`
+        *   `findActiveProxiedTargetForUrl(url: string): Promise<ProxiedTarget | null>` (根据 `target_url_prefix` 匹配传入 URL，查找最长的匹配前缀)。
+*   **1.2 后台 UI (`/admin/targets`)**
+    *   `src/views/admin/targets.tsx`: 创建 Hono JSX 组件。
+        *   **列表视图：** 展示所有配置的代理目标。每项显示 `target_url_prefix`, `is_active` 状态 (使用图标或文本), `enable_js_injection` 状态，以及编辑和删除操作按钮。
+        *   **添加表单：** 一个独立的表单或模态框，用于输入新代理目标的详细信息：`target_url_prefix` (必填), `is_active` (复选框，默认选中), `enable_js_injection` (复选框，默认不选中), `notes` (可选文本域)。
+        *   **编辑模态框/页面：** 类似于添加表单，但预填充现有数据，并提供保存和取消操作。
+    *   `src/routes/admin.ts`: 添加 `/admin/api/targets` 相关的 RESTful API 路由。
+        *   GET `/admin/api/targets`: 调用 `listProxiedTargets` 返回所有目标。
+        *   POST `/admin/api/targets`: 调用 `createProxiedTarget` 创建新目标。
+        *   PUT `/admin/api/targets/:id`: 调用 `updateProxiedTarget` 更新指定目标。
+        *   DELETE `/admin/api/targets/:id`: 调用 `deleteProxiedTarget` 删除指定目标。
+        *   这些 API 路由将调用 `adminService.ts` 中的相应函数来执行数据库操作。
+*   **1.3 代理配置检查中间件 (`src/middleware/config-check.ts`)**
+    *   创建 Hono 中间件，应用于所有代理请求 (即 `/proxy/*` 路径下的所有请求)。
+    *   此中间件的任务是根据当前请求的原始目标 URL，查询 `proxied_targets` 表，找到匹配的活动代理目标配置。
+    *   如果找到匹配的 `ProxiedTarget` 对象，将其通过 `c.set('proxyConfig', config)` 附加到 Hono context，以便后续的代理服务能够访问该配置。
+    *   如果未找到匹配的活动代理目标，则返回 404 Not Found 状态码或重定向到自定义的错误页面。
+
+#### 阶段 2: 异步请求代理策略管理
+
+*   **2.1 数据库交互 (`async_request_policies`)**
+    *   `src/db/index.ts`: 实现 `async_request_policies` 表的 CRUD 函数，以及一个用于列出活动策略的函数：
+        *   `createAsyncPolicy(data: AsyncPolicyInput): Promise<AsyncPolicy>`
+        *   `getAsyncPolicyById(id: string): Promise<AsyncPolicy | null>`
+        *   `updateAsyncPolicy(id: string, data: Partial<AsyncPolicyInput>): Promise<AsyncPolicy>`
+        *   `deleteAsyncPolicy(id: string): Promise<void>`
+        *   `listActiveAsyncPolicies(targetPrefix?: string): Promise<AsyncPolicy[]>`：按 `order_priority` 升序排序，可选择根据 `apply_to_target_prefix` 过滤。
+*   **2.2 后台 UI (`/admin/async-policies`)**
+    *   `src/views/admin/async-policies.tsx`: 创建 Hono JSX 组件。
+        *   **列表视图：** 展示所有异步请求策略，显示策略名称、激活状态、目标 URL 模式 (正则表达式字符串)、执行动作 (`proxy` 或 `direct`)、关联的代理目标前缀以及优先级。
+        *   **添加/编辑表单：** 包含以下字段：`name` (必填), `is_active` (复选框), `target_url_pattern` (必填，文本域，用于输入正则表达式), `action` (下拉选择框，选项为 'proxy' 或 'direct'), `apply_to_target_prefix` (可选文本域，可关联到 `proxied_targets.target_url_prefix`), `order_priority` (数字输入), `notes` (可选文本域)。
+            *   对于 `target_url_pattern`，提供正则表达式的输入提示和基本的语法校验（客户端）。
+    *   `src/routes/admin.ts`: 添加 `/admin/api/async-policies` 相关的 RESTful API 路由，用于策略的创建、读取、更新和删除。
+*   **2.3 服务器端策略提供机制 (集成到 `HTMLRewriter` 流程)**
+    *   修改 `src/services/proxyService.ts` 中的 HTML 响应处理逻辑。
+    *   当代理的响应是 HTML 且 `proxyConfig.enable_js_injection` 为 `true` 时：
+        *   在响应 HTML 的 `<head>` 标签关闭之前，从数据库加载所有激活的 `async_request_policies` (通过 `db.listActiveAsyncPolicies()`, 可根据当前代理的目标URL进行过滤)。
+        *   使用 Cloudflare `HTMLRewriter` 在 `</head>` 标签前注入一个 `<script type="application/json" id="hono-proxy-async-policies-data">` 标签。其内容为这些策略的 JSON 字符串化数据。
+        *   例如：`<script type="application/json" id="hono-proxy-async-policies-data">${JSON.stringify(policies)}</script>`。这个数据将供客户端的 `proxy_client.js` 读取和使用。
+
+#### 阶段 3: 核心 HTTP/HTTPS 代理与基础 URL 重写 (使用 `HTMLRewriter`)
+
+*   **3.1 代理请求路由 (`src/routes/proxy.ts`)**
+    *   在 `src/routes/proxy.ts` 中定义通用的代理路由。
+    *   将之前定义的 `configCheckMiddleware` 应用于此路由。
+    *   例如：`app.use('/proxy/*', configCheckMiddleware);`
+    *   `app.all('/proxy/:protocol/:domain{[a-zA-Z0-9.-]+}/:path{.*}', async (c) => { ... })`
+        *   `/proxy/https/example.com/path/to/resource?query=1`
+        *   `protocol` (捕获 'http' 或 'https'), `domain` (捕获 `example.com`), `path` (捕获剩余路径和查询参数)。
+        *   此路由将调用 `proxyService.handleProxyRequest(c)`.
+*   **3.2 `src/services/proxyService.ts` 核心逻辑**
+    *   实现 `handleProxyRequest(c: Context): Promise<Response>` 函数。
+        *   从 `c.get('proxyConfig')` 获取在 `configCheckMiddleware` 中设置的代理目标配置。
+        *   根据捕获的 `protocol`, `domain`, `path` 和原始请求的查询参数，构造完整的后端目标 URL。
+        *   复制原始请求的请求头，但需要过滤掉 `Host`, `Connection`, `Origin` 等可能导致问题的头部，并添加 `X-Forwarded-For` 等代理相关头部。
+        *   使用 Web Standard `fetch` API 向目标 URL 发起请求，保持原始请求方法 (`c.req.method`) 和请求体 (`c.req.body`).
+        *   处理目标响应：
+            *   复制目标响应的响应头。
+            *   **判断响应类型：** 如果 `Content-Type` 是 `text/html` 且 `proxyConfig.enable_js_injection` 或有激活的替换规则，则使用 `HTMLRewriter` 进行处理。
+            *   否则，直接将目标响应的 `ReadableStream` 转换为 Hono Response 返回，实现流式转发。
+*   **3.3 HTML/CSS 基础 URL 重写 (`src/lib/url-rewriter.ts`, `src/lib/content-modifier.ts` 与 `HTMLRewriter`)**
+    *   `src/lib/url-rewriter.ts`:
+        *   `rewriteUrl(originalUrl: string, currentProxyBaseUrl: string, targetHostAndPath: string): string`
+            *   `originalUrl`: 页面中发现的原始 URL (可以是 `/img.png`, `../style.css`, `http://cdn.com/asset.js` 等)。
+            *   `currentProxyBaseUrl`: 当前代理服务的完整基础 URL，例如 `https://your-proxy.dev/proxy`.
+            *   `targetHostAndPath`: 当前被代理的目标站点的原始 Host 和路径，例如 `https://original-site.com/some/path`.
+            *   此函数将根据 `originalUrl` 的类型（绝对路径、相对路径、协议相对URL等），将其转换为通过当前代理服务器访问的完整代理 URL。
+            *   例如：`/img.png` -> `https://your-proxy.dev/proxy/https/original-site.com/img.png`
+            *   例如：`http://another.com/style.css` -> `https://your-proxy.dev/proxy/http/another.com/style.css`
+    *   `src/lib/content-modifier.ts`:
+        *   `createHtmlRewriterHandler(c: Context, proxyConfig: ProxiedTarget, asyncPolicies: AsyncPolicy[], replaceRules: ReplaceRule[]): HTMLRewriter`
+            *   此函数返回一个配置好的 `HTMLRewriter` 实例。
+            *   获取 `proxyBaseUrl` (例如 `https://${c.req.header('host')}/proxy`) 和 `targetHostAndPath` (来自 `proxyConfig`)。
+            *   配置 `HTMLRewriter` 的 `on()` 方法来处理不同元素：
+                *   `on('a[href]', { element: el => { el.setAttribute('href', rewriteUrl(el.getAttribute('href'), proxyBaseUrl, targetHostAndPath)); } })`
+                *   `on('link[href]', { element: el => { el.setAttribute('href', rewriteUrl(el.getAttribute('href'), proxyBaseUrl, targetHostAndPath)); } })`
+                *   `on('script[src]', { element: el => { el.setAttribute('src', rewriteUrl(el.getAttribute('src'), proxyBaseUrl, targetHostAndPath)); } })`
+                *   `on('img[src]', { element: el => { el.setAttribute('src', rewriteUrl(el.getAttribute('src'), proxyBaseUrl, targetHostAndPath)); } })` (同样处理 `srcset`, `data-src` 等常见属性)
+                *   `on('form[action]', { element: el => { el.setAttribute('action', rewriteUrl(el.getAttribute('action'), proxyBaseUrl, targetHostAndPath)); } })`
+                *   `on('style', { text: chunk => { /* 使用正则表达式匹配 CSS 中的 url(...) 并调用 rewriteUrl */ }})`
+            *   **此时只执行 URL 重写和 JS 注入。用户定义的动态内容替换规则将在阶段 6 实现。**
+*   **3.4 响应头重写 (`proxyService.ts`)**
+    *   在 `proxyService.ts` 中，对从目标服务器接收到的响应头部进行处理。
+    *   **`Location` 头部:** 如果目标响应包含 `Location` 头部（用于重定向），使用 `url-rewriter.ts` 中的逻辑将其值重写为通过代理访问的 URL。
+    *   **`Set-Cookie` 头部:**
+        *   谨慎处理 `Domain` 属性：通常需要移除或替换为代理的域名，以防止泄露或阻止浏览器设置。
+        *   `Path` 属性：如果原始 Path 是 `/`，代理后的 Path 也应是代理的根路径，例如 `/proxy/protocol/domain/`。
+        *   保留 `Secure` 和 `HttpOnly` 属性。
+        *   考虑根据情况添加或修改 `SameSite` 属性（例如 `SameSite=Lax` 或 `SameSite=None; Secure`）。
+
+#### 阶段 4: JavaScript 注入与增强的客户端拦截
+
+*   **4.1 `public/js/proxy_client.js` 设计与编写**
+    *   在 `public/js/` 目录下创建 `proxy_client.js` 文件。
+    *   **获取异步请求策略：** 脚本启动时，查找并解析 HTML 中嵌入的 `<script id="hono-proxy-async-policies-data">` 标签，获取其 `textContent` 并 `JSON.parse()` 得到策略数组。对策略按 `order_priority` 升序排序。
+    *   **URL 重写辅助函数 (客户端版本):** 实现 `getProxiedUrl(originalUrl, currentHostAndPath, proxyBaseUrl)`，将原始 URL 转换为通过代理的 URL 格式。这个函数在客户端用于动态构建 URL。
+    *   **AJAX/Fetch 拦截增强：**
+        *   劫持 `XMLHttpRequest.prototype.open`：保存原始 `open` 方法。在新的 `open` 方法中，获取请求的 URL。
+        *   劫持 `window.fetch`：保存原始 `fetch` 方法。在新的 `fetch` 方法中，获取请求的 URL。
+        *   对每个被拦截的请求 URL，遍历客户端缓存的异步请求策略数组（按优先级排序）。
+        *   根据匹配到的策略的 `action` (`'proxy'` 或 `'direct'`) 决定如何处理 URL：
+            *   如果 `action === 'direct'`，则不修改 URL，直接调用原始的 `open` 或 `fetch` 方法。
+            *   如果 `action === 'proxy'`，则使用客户端的 `getProxiedUrl` 函数重写 URL 指向代理服务器，然后调用原始方法。
+            *   一旦找到匹配的策略，即中断遍历，应用该策略。
+        *   **默认行为：** 如果没有策略匹配，则所有 AJAX/Fetch 请求默认走代理（重写 URL）。
+    *   **WebSocket 构造函数拦截：**
+        *   保存原始 `window.WebSocket` 构造函数。
+        *   劫持 `new WebSocket(url, protocols)`：
+            *   与 Fetch/XHR 拦截类似，遍历异步策略。
+            *   根据匹配策略的 `action` 决定是使用原始 `url` 还是重写后的代理 `url`。
+            *   返回 `new OriginalWebSocket(modifiedUrl, protocols);`。
+            *   默认情况下，所有 WebSocket 连接都通过代理。
+    *   **DOM 变化监听 (`MutationObserver`)：**
+        *   初始化 `MutationObserver` 实例，监听 `document.body` 的 `childList` 和 `subtree` 变化。
+        *   当新的元素被添加到 DOM 中时，遍历这些新元素，查找包含 URL 属性的元素（如 `<a>`, `<img>`, `<script>`, `<link>`）。
+        *   对这些新元素的 URL 属性（`href`, `src`, `action` 等）调用客户端 `getProxiedUrl` 函数进行重写。
+    *   **History API 拦截 (`pushState`, `replaceState`)：**
+        *   劫持 `window.history.pushState` 和 `window.history.replaceState`。
+        *   在调用原始方法前，确保传入的 URL 参数也被 `getProxiedUrl` 转换，以保证浏览器地址栏显示的 URL 是经过代理的 URL。
+*   **4.2 服务器端 JS 注入 (已在阶段 3.3 `HTMLRewriter` 中规划)**
+    *   在 `wrangler.toml` 中配置 Cloudflare Pages 部署 `public` 目录，例如：
+        ```toml
+        # wrangler.toml
+        [pages_build_output]
+        dir = "public"
+        ```
+        或者，将 `public` 目录单独部署到 Cloudflare Pages，并获取其对外可访问的 URL (例如 `https://your-project.pages.dev`)。这个 URL 将作为静态资源的 `BASE_URL`，在 Worker 中通过环境变量或硬编码引用。
+    *   在 `proxyService.ts` 的 `HTMLRewriter` 处理逻辑中，如果 `proxyConfig.enable_js_injection` 为 `true`，则在 HTML 的 `<head>` 标签中注入：
+        *   `<script src="${STATIC_ASSETS_BASE_URL}/js/proxy_client.js" defer></script>`
+        *   已在阶段 2.3 规划的包含异步策略数据的 `<script type="application/json" id="hono-proxy-async-policies-data">...</script>` 标签。
+
+#### 阶段 5: 动态内容替换规则管理
+
+*   **5.1 数据库交互 (`replace_rules`)**
+    *   `src/db/index.ts`: 实现 `replace_rules` 表的 CRUD 函数，以及一个用于列出活动替换规则的函数：
+        *   `createReplaceRule(data: ReplaceRuleInput): Promise<ReplaceRule>`
+        *   `getReplaceRuleById(id: string): Promise<ReplaceRule | null>`
+        *   `updateReplaceRule(id: string, data: Partial<ReplaceRuleInput>): Promise<ReplaceRule>`
+        *   `deleteReplaceRule(id: string): Promise<void>`
+        *   `listActiveReplaceRules(): Promise<ReplaceRule[]>`：按 `order_priority` 升序排序。
+*   **5.2 后台 UI (`/admin/rules`)**
+    *   `src/views/admin/rules.tsx`: 创建 Hono JSX 组件。
+        *   **列表视图：** 展示所有替换规则，显示名称、激活状态、搜索模式（摘要）、替换内容（摘要）、匹配类型、URL 匹配/排除正则表达式、Content-Type 匹配和优先级。
+        *   **添加/编辑表单：** 包含所有字段：
+            *   `name` (必填文本输入)
+            *   `is_active` (复选框)
+            *   `search_pattern` (必填文本域)
+            *   `replace_with` (必填文本域)
+            *   `match_type` (下拉选择框，选项为 'string' 或 'regex')
+            *   `url_match_regex` (可选文本输入，用于输入正则表达式)
+            *   `url_exclude_regex` (可选文本输入，用于输入正则表达式)
+            *   `content_type_match` (可选文本输入，例如 'text/html', 'application/json')
+            *   `order_priority` (数字输入)
+        *   **提供预定义变量提示：** 在 `replace_with` 文本域下方提供提示，例如 `$PROXY_URL_PREFIX` (代理目标的基础 URL，如 `https://myproxy.dev/proxy/https/target.com`), `$TARGET_HOST` (被代理站点的域名，如 `target.com`), `$TARGET_URL` (被代理站点的原始完整 URL), `$REQUEST_PATH` (原始请求的路径部分)。
+        *   **安全提示：** 对于 `match_type` 为 'regex' 时，在 UI 上显示警告，提醒用户注意 ReDoS (正则表达式拒绝服务) 风险，并可提供外部链接指向正则表达式安全编写指南。考虑在客户端进行简单的正则表达式语法校验。
+    *   `src/routes/admin.ts`: 添加 `/admin/api/rules` 相关的 RESTful API 路由，用于规则的创建、读取、更新和删除。
+
+#### 阶段 6: 实现动态内容替换引擎 (集成到 `HTMLRewriter`)
+
+*   **6.1 `content-modifier.ts` 增强 (动态替换逻辑)**
+    *   在 `src/lib/content-modifier.ts` 中，增强 `createHtmlRewriterHandler` 函数。
+    *   **集成顺序：** 确保动态内容替换在基础 URL 重写之后执行。
+    *   **获取规则：** `createHtmlRewriterHandler` 函数将接收从数据库加载的所有激活的 `replaceRules` 数组。
+    *   **`HTMLRewriter` 文本处理：**
+        *   使用 `onDocument({ text(textChunk) { ... } })` 或 `on('body', { text(textChunk) { ... } })` 来处理 HTML 文档中的文本内容。
+        *   **注意 `HTMLRewriter` 的 `text` 处理器是分块的。** 对于简单的、不跨行的字符串替换，可以直接在 `textChunk.content` 上进行操作。对于复杂的、可能跨文本块的正则表达式替换，需要更高级的逻辑（例如，缓冲几个块再处理，或在每次匹配时检查前后文是否完整）。对于大多数网页内容，直接处理通常足够。
+        *   遍历每个 `replaceRule` (按 `order_priority` 排序)：
+            a.  **条件检查：**
+                *   检查 `rule.url_match_regex` 是否与当前请求的原始 URL 匹配。
+                *   检查 `rule.url_exclude_regex` 是否不与当前请求的原始 URL 匹配。
+                *   检查 `rule.content_type_match` 是否与当前响应的 `Content-Type` 匹配（例如 `responseContentType.startsWith(rule.content_type_match)`）。
+            b.  如果所有条件都满足，则执行替换：
+                *   **解析预定义变量：** 在 `rule.replace_with` 字符串中，替换 `$PROXY_URL_PREFIX`, `$TARGET_HOST`, `$TARGET_URL`, `$REQUEST_PATH` 等变量为实际值。
+                *   **执行搜索和替换：**
+                    *   如果 `rule.match_type === 'string'`：使用 `textChunk.content.split(rule.search_pattern).join(resolved_replace_with)` 进行简单字符串替换。
+                    *   如果 `rule.match_type === 'regex'`：
+                        *   创建正则表达式：`const regex = new RegExp(rule.search_pattern, 'g');` (`g` 标志确保全局替换)。
+                        *   执行替换：`textChunk.content = textChunk.content.replace(regex, resolved_replace_with);`
+                        *   **ReDoS 防范：** 可以在此处添加运行时限制，例如通过检查替换操作是否在可接受的时间内完成。然而，Workers 环境对此的直接控制有限，因此前端校验和用户教育至关重要。
+*   **6.2 集成到 `proxyService.ts`**
+    *   在 `proxyService.ts` 中，当处理 HTML 响应时，在调用 `content-modifier.ts` 的 `createHtmlRewriterHandler` 函数时，将从数据库加载的 `activeReplaceRules` 数组作为参数传递进去。这样 `HTMLRewriter` 实例在处理响应时能够访问并应用这些规则。
+
+#### 阶段 7: WebSocket 代理
+
+*   **7.1 HonoJS 与 WebSocket 集成 (`src/routes/proxy.ts`)**
+    *   在 `src/routes/proxy.ts` 中添加 WebSocket 升级路由，它将作为 `proxy_client.js` 连接 WebSocket 的目标。
+    *   使用 Hono 的 `upgradeWebSocket` 功能：
+        *   例如：`app.get('/websocket-proxy/:protocol/:domain{[a-zA-Z0-9.-]+}/:path{.*}', upgradeWebSocket(async (c) => { ... }))`
+        *   此路由路径将由 `proxy_client.js` 在客户端拦截 `new WebSocket()` 时构造。
+*   **7.2 WebSocket 代理逻辑 (`src/services/proxyService.ts` 或直接在路由处理器中)**
+    *   在 `upgradeWebSocket` 的处理函数中，实现 WebSocket 的双向代理逻辑。
+    *   **获取目标 URL：** 根据路由参数 (`protocol`, `domain`, `path`) 构造目标 WebSocket 服务器的 URL（例如 `ws://target.com/path` 或 `wss://target.com/path`）。
+    *   **建立连接：** `const serverWs = new WebSocket(targetUrl);`
+    *   **双向消息转发：**
+        *   当客户端 WebSocket (`clientWs`) 接收到消息时，转发给目标服务器 WebSocket (`serverWs`)：`clientWs.accept().onmessage = (event) => serverWs.send(event.data);`
+        *   当目标服务器 WebSocket (`serverWs`) 接收到消息时，转发给客户端 WebSocket (`clientWs`)：`serverWs.onmessage = (event) => clientWs.send(event.data);`
+    *   **错误和关闭处理：**
+        *   监听客户端和服务器端 WebSocket 的 `close` 和 `error` 事件。当其中一个连接关闭或出错时，关闭另一个连接，并进行适当的日志记录。
+        *   `clientWs.accept().onclose = () => serverWs.close();`
+        *   `serverWs.onclose = () => clientWs.close();`
+        *   `clientWs.accept().onerror = (err) => { serverWs.close(); console.error("Client WS error:", err); };`
+        *   `serverWs.onerror = (err) => { clientWs.close(); console.error("Server WS error:", err); };`
+    *   **思考：** `proxy_client.js` (阶段 4.1) 已经负责根据 `async_request_policies` 决定 WebSocket 连接 URL 是直连还是指向此代理路径。默认情况下，所有 WebSocket 连接将通过代理。如果需要更精细的控制，可以在 `proxy_client.js` 中扩展逻辑。
+
+#### 8. 全局设置与完善
+
+*   **8.1 后台 UI (Global Settings - `/admin/settings`)**
+    *   `src/views/admin/settings.tsx`: 创建 Hono JSX 组件，用于渲染一个表单，允许管理员修改密码。包含当前密码、新密码和确认新密码字段。
+    *   `src/routes/admin.ts`: 添加 POST `/admin/api/settings/change-password` 路由，用于处理密码修改请求。
+    *   `src/services/adminService.ts`: 实现 `changeAdminPassword(currentPassword: string, newPassword: string): Promise<boolean>` 函数，负责验证当前密码，然后更新哈希后的新密码到 D1。
+*   **8.2 错误处理与日志**
+    *   配置 Hono 的全局错误处理器：`app.onError((err, c) => { /* ... */ });`。在此处捕获未被特定路由处理的错误，并返回用户友好的错误页面或 JSON 响应（取决于请求类型）。
+    *   在关键操作（如数据库交互、外部 `fetch` 请求、WebSocket 连接）中添加 `try...catch` 块。
+    *   利用 Cloudflare Workers 的 `console.log` 进行日志记录，这些日志会在 Workers 控制台或 Wrangler CLI 中显示。对于生产环境，考虑与 Cloudflare Logpush 或其他日志服务集成。
+*   **8.3 安全加固**
+    *   **XSRF 防护 (CSRF):** 对于所有执行状态变更的 POST/PUT/DELETE Admin API 请求，考虑集成 CSRF token 机制。例如，在每个表单中嵌入一个 CSRF token，并在后端验证。Hono 可能有相关的中间件或社区库。
+    *   **环境变量：** 确保所有敏感信息（如 JWT 密钥）都通过环境变量加载，例如 `c.env.JWT_SECRET`，绝不硬编码在代码中。
+    *   **输入校验：** 对所有来自用户输入（Admin UI 表单提交、URL 参数、查询字符串）的数据进行严格的服务器端校验，以防注入攻击、数据格式错误或逻辑漏洞。
+    *   **Content Security Policy (CSP):** 为 Admin UI 响应设置合适的 CSP 头部，以减少 XSS (跨站脚本) 攻击的风险。
+    *   **HTTP 安全头部：** 确保设置 `X-Content-Type-Options`, `X-Frame-Options`, `Strict-Transport-Security` 等标准安全头部。
+*   **8.4 性能优化**
+    *   **数据库查询优化：** 确保 D1 查询高效，为常用查询字段（如 `target_url_prefix`）创建索引。批量读取策略和规则以减少 D1 往返次数。
+    *   **`HTMLRewriter` 使用：** 尽可能保持流式处理，避免在内存中缓冲整个响应体，尤其是在处理大型页面时。
+    *   **`proxy_client.js`：** 优化脚本大小，使用 ES Modules 导入，进行代码压缩和混淆，以减少加载时间。
+*   **8.5 多平台部署配置 (`wrangler.toml`)**
+    *   **Cloudflare Workers & D1 & Pages (首选配置):**
+        *   在 `wrangler.toml` 中，除了 D1 配置，还需配置 Workers 入口点 (`main = "src/index.ts"`)、兼容性日期和标志。
+        *   **Pages 静态资产集成：**
+            *   方案A (推荐)：将 `public` 目录单独部署到 Cloudflare Pages。获取其域名 (例如 `https://your-project.pages.dev`)，并将其作为环境变量（如 `STATIC_ASSETS_BASE_URL`）注入到 Worker 中。在 `proxyService.ts` 中引用此环境变量来构建 `proxy_client.js` 的 URL。
+            *   方案B (备选)：如果希望通过 Worker 提供静态文件，可以配置 `pages_build_output_dir = "public"`，并配置 Hono 路由来服务 `/static/*` 路径下的文件。但 Pages 托管通常更高效。
+    *   为 Deno Deploy/Vercel 等其他 Serverless 平台提供基本的部署指南和示例配置，说明其特定的数据库连接方式（如 HTTP API）和静态文件托管方式。
+*   **8.6 文档与测试**
+    *   **`README.md`：** 编写详细的项目 README 文件，包含：
+        *   项目概述和核心功能。
+        *   安装和本地运行指南 (包括如何配置 D1 模拟器或真实 D1)。
+        *   Cloudflare Workers/Pages 部署指南。
+        *   环境变量配置说明。
+        *   管理后台功能和使用说明。
+        *   核心代理功能的工作原理。
+        *   未来计划和贡献指南。
+    *   **测试：**
+        *   **单元测试 (推荐 Vitest):** 为 `src/lib/url-rewriter.ts` 中的 URL 转换逻辑、`src/db/index.ts` 中的数据库操作函数、`src/services/adminService.ts` 中的密码哈希和 JWT 生成/验证逻辑编写单元测试。
+        *   **集成测试 (推荐 Hono 的测试工具 `hono/testing`):** 测试 Hono 路由和中间件的集成，例如登录流程、Admin API 的 CRUD 操作、代理请求的转发和响应头处理。
+        *   **端到端测试 (推荐 Playwright 或 Cypress):** 模拟真实用户行为，测试从登录到配置代理规则，再到实际访问代理页面的完整流程。验证 `proxy_client.js` 的拦截效果和内容替换效果。
+
+---
+
+**职责划分 (适用于单人或小团队的逻辑分工):**
+
+1.  **核心后端与代理逻辑 (主要开发者/负责人A)**
+    *   HonoJS 应用骨架、路由 (`src/routes/*`)
+    *   认证与授权 (`src/middleware/auth.ts`, `setup-check.ts`)
+    *   代理核心服务 (`src/services/proxyService.ts`, `src/middleware/config-check.ts`)
+    *   内容修改与 URL 重写引擎 (`src/lib/*`, `HTMLRewriter` 集成，包括动态替换逻辑)
+    *   WebSocket 代理逻辑的实现
+2.  **数据库与数据管理 (主要开发者/负责人A)**
+    *   D1 Schema 设计与迁移 (`src/db/schema.sql`)
+    *   D1 数据库 CRUD 操作封装 (`src/db/index.ts`)
+    *   Admin Service 业务逻辑 (`src/services/adminService.ts`)
+3.  **前端管理界面 (Admin UI) (次要开发者/负责人B 或 负责人A 的次要任务)**
+    *   HonoJS JSX 视图组件的编写 (`src/views/**/*.tsx`)
+    *   Admin UI 布局与基础样式 (`public/css/admin_styles.css`)
+    *   Admin API 的前端调用逻辑（如使用 `fetch` API）与简单状态管理
+4.  **客户端代理脚本 (`proxy_client.js`) (次要开发者/负责人B 或 负责人A 的次要任务)**
+    *   `public/js/proxy_client.js` 的设计与实现（包括 AJAX/Fetch/WebSocket 拦截、策略应用、DOM 操作、History API 拦截）。
+5.  **部署、运维与文档 (主要开发者/负责人A 牵头，B 协助)**
+    *   `wrangler.toml` 配置与 Cloudflare Workers/Pages 部署流程
+    *   错误监控与日志策略的规划与实现
+    *   `README.md` 及其他开发文档（如 `deve_log.mcd`, `设计文档.mcd`）的编写与维护
+6.  **测试与质量保证 (团队共同责任)**
+    *   单元测试、集成测试、端到端测试的编写与执行。
+    *   进行代码审查，确保代码质量和安全性。
+
+
+**开发步骤建议：**
+
+1.  **明确目标平台：** 在开始任何代码编写前，请再次确认当前任务的目标部署平台是 Cloudflare Workers，并以此为基础进行数据库（D1）和静态资源（Pages）的选择。
+2.  **为每个“任务 X.Y”创建一个分支或一个明确的 commit 序列。** 保持提交粒度小，便于代码审查和回溯。
+3.  **拥抱 Web Standard API：** 始终优先考虑使用 `fetch` API 和其他 Web 标准 API，避免引入 Node.js 特有模块，以确保在边缘环境的最佳兼容性和性能。
+4.  **数据库决策：** 在阶段 0.2，请根据选定的 Cloudflare D1 方案，实现对应的数据库交互方式。**请确认你选择的数据库方案，并以此为基础进行后续开发。**
+5.  **小步快跑，频繁测试：** 完成每个小子任务后，立即运行和测试。例如，完成登录表单的 JSX 后，就启动服务在浏览器中查看。完成 `fetch` 请求转发基础后，就尝试代理一个简单的静态图片。
+6.  **优先核心，再完善细节：** 先确保代理的核心流程能跑通 (请求转发、基本内容返回)，再逐步添加复杂的重写、注入和替换逻辑。
+7.  **利用 AI 能力：**
+    *   **代码生成:** 对于一些模式化的代码 (如 CRUD API 路由、JSX 表单组件、数据库查询函数)，辅助生成初始框架。例如：“请帮我用 HonoJS JSX 创建一个包含用户名和密码字段的登录表单组件。” 或 “请帮我写一个使用 Cloudflare D1 查询 `proxied_targets` 表所有记录的函数。”
+    *   **代码解释:** 当遇到 HonoJS 特定 API 或 Serverless 运行时特性不熟悉时，寻求解释。
+    *   **调试辅助:** 当遇到错误时，可以将错误信息和相关代码片段提供，寻求调试建议。
+    *   **重构建议:** 完成一个功能模块后，检查代码并提供重构或优化建议。
+    *   **正则生成/校验:** 对于 CSS URL 重写或内容替换等需要正则的场景，帮助生成和测试正则表达式。
+    *   **部署配置辅助：** 辅助生成 `wrangler.toml` 的基本结构。
+8.  **记录问题和解决方案：** 开发过程中遇到的难点、解决方案、以及一些取舍，都应该记录到 `deve_log.mcd` 文件中，方便后续回顾和协作。
+9.  使用 `.cursor/` 目录来存储设计文档和开发计划等信息，文件以 `.mcd` 后缀的 markdown 格式输出。例如 `.cursor/设计文档.mcd`, `.cursor/开发计划.mcd`。
+10. 开发进度及其过程中遇到的问题请总结输出到 ./cursor/deve_log.mcd 文件中
+11. 开发中遇到错误请尽可能AI自行解决
