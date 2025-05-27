@@ -2,7 +2,7 @@
 import { Hono } from 'hono';
 import { SetupPage } from '../views/admin/setup';
 import { LoginPage } from '../views/admin/login'; // To be created
-import { setupAdminPassword, loginAdmin } from '../services/adminService'; // Import loginAdmin
+import { setupAdminPassword, loginAdmin, changeAdminPassword } from '../services/adminService'; // Import changeAdminPassword
 import { Env } from '../db';
 import * as db from '../db'; // Import all db functions
 import { DashboardPage } from '../views/admin/dashboard';
@@ -13,6 +13,7 @@ import { CachePage } from '../views/admin/cache'; // Import CachePage
 import { protectRouteMiddleware, UserPayload } from '../middleware/auth'; // Import protectRouteMiddleware and UserPayload
 // import { deleteCookie } from 'hono/cookie'; // For logout if using cookies
 import { LogsPage, LogsPageProps } from '../views/admin/logs';
+import { SettingsPage } from '../views/admin/settings'; // Import SettingsPage
 // Ensure db functions for request_logs are available (already imported via import * as db)
 // No need to import 'render' from 'hono/jsx-renderer' here.
 // Components defined with jsxRenderer are functions that return JSX elements.
@@ -39,7 +40,7 @@ admin.post('/api/setup', async (c) => {
   const confirmPassword = formData.get('confirm_password') as string;
 
   if (!password || password !== confirmPassword) {
-    const page = SetupPage({ error: 'Passwords do not match or are empty.', success: null });
+    const page = SetupPage({ error: '密码不匹配或为空。', success: null });
     return c.html(page === null ? '' : page, 400);
   }
 
@@ -48,7 +49,7 @@ admin.post('/api/setup', async (c) => {
     return c.redirect('/admin/login?setup_success=true');
   } catch (error) {
     console.error('Setup error:', error);
-    const page = SetupPage({ error: 'Failed to set up admin password.', success: null });
+    const page = SetupPage({ error: '设置管理员密码失败。', success: null });
     return c.html(page === null ? '' : page, 500);
   }
 });
@@ -58,8 +59,8 @@ admin.get('/login', (c) => {
   const setupSuccess = c.req.query('setup_success') === 'true';
   const unauthorized = c.req.query('unauthorized') === 'true';
   let message: string | null = null;
-  if (setupSuccess) message = 'Admin password set up successfully! Please log in.';
-  if (unauthorized) message = 'You need to log in to access this page.';
+  if (setupSuccess) message = '管理员密码设置成功！请登录。';
+  if (unauthorized) message = '您需要登录才能访问此页面。';
   
   const page = LoginPage({ error: null, message: message });
   return c.html(page === null ? '' : page);
@@ -72,14 +73,14 @@ admin.post('/api/login', async (c) => {
   // const username = formData.get('username') as string;
 
   if (!password) { // Add username validation if used
-    const page = LoginPage({ error: 'Password is required.', message: null });
+    const page = LoginPage({ error: '请输入密码。', message: null });
     return c.html(page === null ? '' : page, 400);
   }
 
   const secret = c.env.JWT_SECRET;
   if (!secret) {
      console.error('JWT_SECRET not configured for login.');
-     const page = LoginPage({ error: 'Server configuration error.', message: null });
+     const page = LoginPage({ error: '服务器配置错误。', message: null });
      return c.html(page === null ? '' : page, 500);
   }
 
@@ -87,7 +88,7 @@ admin.post('/api/login', async (c) => {
     const token = await loginAdmin(c.env.DB, password, secret); // Pass secret to loginAdmin
     if (token) {
       // Option 1: Return token in JSON response for client to handle
-      return c.json({ token, message: 'Login successful. Redirecting...' });
+      return c.json({ token, message: '登录成功，正在跳转...' });
 
       // Option 2: Set as HttpOnly cookie (requires hono/cookie middleware)
       // import { setCookie } from 'hono/cookie';
@@ -101,12 +102,12 @@ admin.post('/api/login', async (c) => {
       // return c.redirect('/admin/dashboard');
       
     } else {
-      const page = LoginPage({ error: 'Invalid username or password.', message: null });
+      const page = LoginPage({ error: '用户名或密码无效。', message: null });
       return c.html(page === null ? '' : page, 401);
     }
   } catch (error) {
     console.error('Login error:', error);
-    const page = LoginPage({ error: 'An error occurred during login.', message: null });
+    const page = LoginPage({ error: '登录过程中发生错误。', message: null });
     return c.html(page === null ? '' : page, 500);
   }
 });
@@ -785,6 +786,44 @@ protectedAdmin.delete('/api/logs/all', async (c) => {
         console.error("Failed to clear all logs:", e);
         return c.json({ error: "Failed to clear all logs" }, 500);
     }
+});
+
+// Add Settings page route
+protectedAdmin.get('/settings', async (c) => {
+  const user = c.get('user');
+  const error = c.req.query('error');
+  const success = c.req.query('success');
+  
+  const pageComponent = SettingsPage({ user, error, success });
+  return c.html(pageComponent === null ? '' : pageComponent);
+});
+
+// API route for changing admin password
+protectedAdmin.post('/api/settings/change-password', async (c) => {
+  try {
+    const formData = await c.req.formData();
+    const currentPassword = formData.get('current_password') as string;
+    const newPassword = formData.get('new_password') as string;
+    const confirmNewPassword = formData.get('confirm_new_password') as string;
+    
+    if (!currentPassword || !newPassword || !confirmNewPassword) {
+      return c.json({ error: '所有字段都是必填的' }, 400);
+    }
+    
+    if (newPassword !== confirmNewPassword) {
+      return c.json({ error: '新密码与确认密码不匹配' }, 400);
+    }
+    
+    const success = await changeAdminPassword(c.env.DB, currentPassword, newPassword);
+    if (success) {
+      return c.json({ message: '密码修改成功' });
+    } else {
+      return c.json({ error: '密码修改失败' }, 500);
+    }
+  } catch (error: any) {
+    console.error('Password change error:', error);
+    return c.json({ error: error.message || '修改密码时发生错误' }, 400);
+  }
 });
 
 // Example Logout Route (can be a POST or GET depending on preference)

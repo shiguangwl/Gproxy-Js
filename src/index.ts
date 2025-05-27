@@ -30,15 +30,6 @@ app.use('/admin/*', authMiddleware); // Apply specifically to admin routes
 app.route('/admin', adminRoutes);
 app.route('/', proxyAppRoutes); // Mount the proxy app. It handles /proxy/* internally.
 
-// Serve static assets from 'public' directory
-// For local development, we'll use a simple handler instead of serveStatic
-// which requires __STATIC_CONTENT to be defined
-app.get('/static/*', async (c) => {
-  // In local development, return a 404 for now
-  // In production with Pages integration, this would be handled differently
-  return c.text('Static file not found in development mode', 404);
-});
-
 app.get('/favicon.ico', async (c) => {
   // Return a simple response for favicon in development
   return c.text('Favicon not available in development mode', 404);
