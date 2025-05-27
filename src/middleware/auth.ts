@@ -32,9 +32,16 @@ export const authMiddleware: MiddlewareHandler<AuthHandlerEnv, '/admin/*' > = as
   if (authHeader && authHeader.startsWith('Bearer ')) {
     token = authHeader.substring(7);
   } else {
-    // Fallback to checking a cookie if you plan to use cookies for JWT
-    // import { getCookie } from 'hono/cookie';
-    // token = getCookie(c, 'jwt_token'); // Example, if using hono/cookie
+    // Fallback to checking a cookie for JWT
+    const cookieHeader = c.req.header('Cookie');
+    if (cookieHeader) {
+      const cookies = cookieHeader.split(';').reduce((acc, cookie) => {
+        const [key, value] = cookie.trim().split('=');
+        acc[key] = value;
+        return acc;
+      }, {} as Record<string, string>);
+      token = cookies['jwt_token'];
+    }
   }
 
   if (token) {

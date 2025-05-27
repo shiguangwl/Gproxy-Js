@@ -1,7 +1,0 @@
-# wrangler.toml
-
-[[d1_databases]]
-binding = "DB" # 在 Worker 中访问数据库的绑定名称
-database_name = "honoproxy_db" # 用户需要替换为真实的 D1 数据库名称
-database_id = "004a0eeb-875d-4dc7-b911-31fb60fdb4da"   # 用户需要替换为真实的 D1 数据库 ID
-# preview_database_id = "YOUR_D1_PREVIEW_DATABASE_ID"  可选，用于 wrangler dev 的预览数据库 ID

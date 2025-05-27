@@ -41,7 +41,8 @@ export const LoginPage: FC<LoginPageProps> = ({ error, message }) => {
             });
             const result = await response.json();
             if (response.ok && result.token) {
-              localStorage.setItem('jwt_token', result.token); // Example: store in localStorage
+              // Store JWT token in cookie
+              document.cookie = 'jwt_token=' + result.token + '; path=/; max-age=86400; SameSite=Lax';
               window.location.href = '/admin/dashboard'; // Redirect
             } else {
               // Update error message on the page

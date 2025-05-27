@@ -1,0 +1,83 @@
+# HonoProxy 开发日志
+
+## 2025-05-27 - 本地开发环境启动
+
+### 问题1: Node.js 兼容性错误
+**错误描述**: 启动时出现多个 Node.js 内置模块无法解析的错误，如 `buffer`, `crypto`, `util`, `stream` 等。
+
+**错误信息**:
+```
+✘ [ERROR] Could not resolve "crypto"
+✘ [ERROR] Could not resolve "buffer"
+✘ [ERROR] Could not resolve "util"
+✘ [ERROR] Could not resolve "stream"
+```
+
+**解决方案**: 在 `wrangler.jsonc` 中启用 `nodejs_compat` 兼容性标志：
+```json
+"compatibility_flags": [
+  "nodejs_compat"
+]
+```
+
+### 问题2: JWT_SECRET 环境变量未配置
+**错误描述**: 登录时出现 "JWT_SECRET not configured for login" 错误。
+
+**解决方案**: 创建 `.dev.vars` 文件配置本地开发环境变量：
+```
+JWT_SECRET=your-super-secret-jwt-key-for-development-only-change-in-production-1234567890abcdef
+APP_ENV=development
+```
+
+### 问题3: 静态资源服务错误
+**错误描述**: 使用 `serveStatic` 时出现 `__STATIC_CONTENT is not defined` 错误。
+
+**错误信息**:
+```
+✘ [ERROR] ReferenceError: __STATIC_CONTENT is not defined
+```
+
+**解决方案**: 在本地开发环境中移除 `serveStatic` 的使用，改为简单的路由处理器：
+```typescript
+app.get('/static/*', async (c) => {
+  return c.text('Static file not found in development mode', 404);
+});
+```
+
+### 成功启动的功能测试
+
+1. **数据库初始化**: ✅ 成功执行 schema.sql
+2. **管理员密码设置**: ✅ POST /admin/api/setup 正常工作
+3. **管理员登录**: ✅ POST /admin/api/login 返回有效JWT token
+4. **仪表盘访问**: ✅ GET /admin/dashboard 使用JWT认证成功
+
+### 当前状态
+- 本地开发服务器运行在 http://localhost:8787
+- 管理员密码: admin123
+- JWT认证系统正常工作
+- 基础管理界面可访问
+
+### 问题4: 登录后无法重定向到仪表盘
+**错误描述**: 用户设置密码并登录后，一直停留在登录界面，无法跳转到仪表盘。
+
+**根本原因**: 
+1. 认证中间件只检查 `Authorization` 头部，但前端将JWT存储在 `localStorage` 中
+2. 前端重定向到仪表盘时没有发送认证信息
+3. 仪表盘页面需要认证，但无法获取到JWT token
+
+**解决方案**: 
+1. 修改认证中间件，支持从Cookie中读取JWT token
+2. 修改登录页面JavaScript，将JWT存储在Cookie中而不是localStorage
+3. 修复JavaScript模板字符串的转义问题
+
+**修改的文件**:
+- `src/middleware/auth.ts`: 添加Cookie解析逻辑
+- `src/views/admin/login.tsx`: 修改token存储方式为Cookie
+
+### 下一步计划
+1. 测试完整的登录流程（浏览器端）
+2. 测试代理目标管理功能
+3. 测试内容替换规则管理
+4. 测试异步请求策略管理
+5. 实现核心代理功能
+6. 测试WebSocket代理 

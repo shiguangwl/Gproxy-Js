@@ -3,14 +3,14 @@
   "name": "gproxy-js",
   "main": "src/index.ts",
   "compatibility_date": "2025-05-26",
-  "account_id": "<请填写您的 Account ID>",
+  "account_id": "258472b8edd04496885e58c82da3eacd",
   "vars": {
     "APP_ENV": "production"
   },
   "kv_namespaces": [
     {
       "binding": "CACHE_STORE",
-      "id": "<请填写您的 KV Namespace ID>"
+      "id": "9b669bd589d64b2c81b29f83e3b3e884"
     }
   ],
   "r2_buckets": [
@@ -23,7 +23,7 @@
     {
       "binding": "DB",
       "database_name": "gproxy-db",
-      "database_id": "<请填写您的 D1 Database ID>"
+      "database_id": "004a0eeb-875d-4dc7-b911-31fb60fdb4da"
     }
   ],
   "migrations": [
@@ -34,10 +34,10 @@
   ],
   "placement": {
     "mode": "smart"
-  }
-  // "compatibility_flags": [
-  //   "nodejs_compat"
-  // ],
+  },
+  "compatibility_flags": [
+    "nodejs_compat"
+  ]
   // "ai": {
   //   "binding": "AI"
   // },

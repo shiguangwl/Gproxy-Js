@@ -21,7 +21,7 @@ export const DefaultLayout: FC<LayoutProps> = ({ children, title = 'HonoProxy Ad
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>${title}</title>
-        <link rel="stylesheet" href="/public/css/admin_styles.css"> {/* Adjust path if needed based on static serving */}
+        <link rel="stylesheet" href="/public/css/admin_styles.css">
         <style>
           body { font-family: sans-serif; margin: 0; display: flex; min-height: 100vh; flex-direction: column; }
           header { background-color: #333; color: white; padding: 1em; }

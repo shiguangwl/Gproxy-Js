@@ -49,4 +49,26 @@ export async function loginAdmin(db: D1Database, passwordInput: string, jwtSecre
   return null;
 }
 
-export async function changeAdminPassword(db: D1Database, currentPassword: string, newPassword: string): Promise<boolean> { return false; /* Placeholder */ }
+export async function changeAdminPassword(db: D1Database, currentPassword: string, newPassword: string): Promise<boolean> {
+  if (!currentPassword || !newPassword) {
+    throw new Error('Current password and new password are required.');
+  }
+
+  // Get the current password hash
+  const hashedPassword = await getSetting(db, 'admin_password_hash');
+  if (!hashedPassword) {
+    throw new Error('Admin password not found.');
+  }
+
+  // Verify current password
+  const match = await bcrypt.compare(currentPassword, hashedPassword);
+  if (!match) {
+    throw new Error('Current password is incorrect.');
+  }
+
+  // Hash and save new password
+  const newHashedPassword = await bcrypt.hash(newPassword, SALT_ROUNDS);
+  await setSetting(db, 'admin_password_hash', newHashedPassword);
+  
+  return true;
+}
